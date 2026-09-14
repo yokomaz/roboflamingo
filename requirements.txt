@@ -1,0 +1,9 @@
+numpy
+Pillow
+torch
+transformers
+open-flamingo
+open_clip_torch
+einops
+modelscope
+

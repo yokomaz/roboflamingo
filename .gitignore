@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+.env
+
+# IDE and local tooling
+.vscode/
+.idea/
+.codex/
+
+# Local models, caches, datasets, and experiment outputs
+models/
+calvin/dataset/
+runs/
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+*.npz
+
+# CALVIN is kept locally or installed as an external dependency.
+calvin/
+
+# Logs
+*.log
+
