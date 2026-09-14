@@ -1,9 +1,11 @@
-numpy
-Pillow
-torch
-transformers
-open-flamingo
-open_clip_torch
-einops
-modelscope
+# Application dependencies tested in the roboflamingo environment.
+# Install a server-compatible PyTorch build separately before this file.
+numpy==2.5.2
+Pillow==12.3.0
+transformers==4.57.6
+open-flamingo==2.0.1
+open-clip-torch==3.3.0
+einops==0.8.2
+modelscope==1.40.0
+sentencepiece==0.2.2
 

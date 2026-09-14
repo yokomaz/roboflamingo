@@ -13,12 +13,31 @@ A local RoboFlamingo reproduction workspace for CALVIN language-conditioned robo
 
 ## Setup
 
-Use a server-provided PyTorch/CUDA image when available, then install the project dependencies:
+Use a server-provided PyTorch/CUDA image when available. Conda channels only
+apply to Conda packages; model and OpenFlamingo packages are installed by pip.
 
 ```bash
-conda create -n roboflamingo python=3.12 -y
+conda env create -f environment.yml
 conda activate roboflamingo
+```
+
+The tested local environment is `aarch64` with NVIDIA GB10 and CUDA 13.0.
+For the same platform, install the tested PyTorch set first:
+
+```bash
+pip install -r requirements-cu130-aarch64.txt
+```
+
+On another server, install the PyTorch build matching its preconfigured image, then run:
+
+```bash
 pip install -r requirements.txt
+```
+
+Check compatibility before training:
+
+```bash
+python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
 ```
 
 Install CALVIN from its upstream repository or from a local clone:
