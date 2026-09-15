@@ -80,7 +80,8 @@ def create_model(
     cache_dir=None,
     use_local_files=False,
 ):
-    if Path(vision_encoder_path).is_dir():
+    vision_encoder_path = str(vision_encoder_path)
+    if Path(vision_encoder_path).is_dir() or "/" in vision_encoder_path:
         return _create_model_from_huggingface_clip(
             vision_encoder_path=vision_encoder_path,
             lang_encoder_path=lang_encoder_path,
@@ -145,13 +146,13 @@ def _create_model_from_huggingface_clip(
     from open_flamingo.src.utils import extend_instance
 
     vision_model = CLIPVisionModel.from_pretrained(
-        vision_encoder_path, local_files_only=True
+        vision_encoder_path, local_files_only=use_local_files
     )
     vision_encoder = HuggingFaceCLIPVision(vision_model)
     vision_container = nn.Module()
     vision_container.visual = vision_encoder
     image_processor = CLIPImageProcessor.from_pretrained(
-        vision_encoder_path, local_files_only=True
+        vision_encoder_path, local_files_only=use_local_files
     )
     tokenizer = AutoTokenizer.from_pretrained(
         tokenizer_path,

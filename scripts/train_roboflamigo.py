@@ -15,6 +15,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from roboflamingo import CalvinCollator, CalvinDataset, create_model
 
 
+DEFAULT_VISION_ENCODER = Path(
+    "models/language_conditioned/clip_vit_l14/"
+    "modelscope_clip_vit_large_patch14"
+)
+DEFAULT_LANGUAGE_MODEL = Path("models/language_conditioned/mpt_1b_dolly")
+DEFAULT_BACKBONE_CHECKPOINT = Path(
+    "models/language_conditioned/"
+    "openflamingo_3b_vitl_mpt1b_langinstruct/checkpoint.pt"
+)
+HF_VISION_ENCODER = "openai/clip-vit-large-patch14"
+HF_LANGUAGE_MODEL = "anas-awadalla/mpt-1b-redpajama-200b-dolly"
+HF_BACKBONE_REPO = "openflamingo/OpenFlamingo-3B-vitl-mpt1b-langinstruct"
+
+
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -83,6 +97,27 @@ def evaluate(model, loader, device):
     return (totals / max(batches, 1)).cpu().tolist()
 
 
+def resolve_model_source(source, default_path, remote_id, local_files_only):
+    path = Path(source)
+    if path.exists():
+        return str(path)
+    if local_files_only:
+        raise FileNotFoundError(f"Local model path not found: {path}")
+    return remote_id if path == default_path else source
+
+
+def resolve_checkpoint(source, local_files_only):
+    path = Path(source)
+    if path.is_file():
+        return str(path)
+    if local_files_only or path != DEFAULT_BACKBONE_CHECKPOINT:
+        raise FileNotFoundError(f"Checkpoint not found: {path}")
+
+    from huggingface_hub import hf_hub_download
+
+    return hf_hub_download(HF_BACKBONE_REPO, "checkpoint.pt")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -92,24 +127,15 @@ def main():
     )
     parser.add_argument(
         "--vision-encoder",
-        type=Path,
-        default=Path(
-            "models/language_conditioned/clip_vit_l14/"
-            "modelscope_clip_vit_large_patch14"
-        ),
+        default=str(DEFAULT_VISION_ENCODER),
     )
     parser.add_argument(
         "--language-model",
-        type=Path,
-        default=Path("models/language_conditioned/mpt_1b_dolly"),
+        default=str(DEFAULT_LANGUAGE_MODEL),
     )
     parser.add_argument(
         "--backbone-checkpoint",
-        type=Path,
-        default=Path(
-            "models/language_conditioned/"
-            "openflamingo_3b_vitl_mpt1b_langinstruct/checkpoint.pt"
-        ),
+        default=str(DEFAULT_BACKBONE_CHECKPOINT),
     )
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--window-size", type=int, default=32)
@@ -119,17 +145,37 @@ def main():
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--output", type=Path, default=Path("runs/roboflamingo_debug"))
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("runs/roboflamingo_debug"),
+    )
+    parser.add_argument("--local-files-only", action="store_true")
     args = parser.parse_args()
 
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    vision_encoder = resolve_model_source(
+        args.vision_encoder,
+        DEFAULT_VISION_ENCODER,
+        HF_VISION_ENCODER,
+        args.local_files_only,
+    )
+    language_model = resolve_model_source(
+        args.language_model,
+        DEFAULT_LANGUAGE_MODEL,
+        HF_LANGUAGE_MODEL,
+        args.local_files_only,
+    )
+    backbone_checkpoint = resolve_checkpoint(
+        args.backbone_checkpoint, args.local_files_only
+    )
     model, image_processor, tokenizer = create_model(
-        vision_encoder_path=str(args.vision_encoder),
-        lang_encoder_path=str(args.language_model),
-        tokenizer_path=str(args.language_model),
-        checkpoint_path=str(args.backbone_checkpoint),
-        use_local_files=True,
+        vision_encoder_path=vision_encoder,
+        lang_encoder_path=language_model,
+        tokenizer_path=language_model,
+        checkpoint_path=backbone_checkpoint,
+        use_local_files=args.local_files_only,
     )
     trainable = configure_trainable_parameters(model)
     model.to(device)
