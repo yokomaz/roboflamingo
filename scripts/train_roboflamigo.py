@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 import argparse
+import csv
 import math
 import random
 import sys
@@ -76,6 +77,64 @@ def action_loss(prediction, target):
         prediction[..., 6], gripper_target
     )
     return pose_loss + gripper_loss, pose_loss, gripper_loss
+
+
+def write_loss_curve(train_history, validation_history, output_path):
+    series = [
+        ("train total", "#2563eb", [(row[0], row[1]) for row in train_history]),
+        ("train pose", "#16a34a", [(row[0], row[2]) for row in train_history]),
+        ("train gripper", "#dc2626", [(row[0], row[3]) for row in train_history]),
+        (
+            "holdout total",
+            "#9333ea",
+            [(row[0], row[1]) for row in validation_history if row[4] == "holdout"],
+        ),
+    ]
+    values = [value for _, _, points in series for _, value in points]
+    if not values:
+        return
+
+    width, height = 1000, 600
+    left, right, top, bottom = 80, 30, 40, 70
+    plot_width = width - left - right
+    plot_height = height - top - bottom
+    max_step = max(step for _, _, points in series for step, _ in points)
+    max_loss = max(values)
+    max_step = max(max_step, 1)
+    max_loss = max(max_loss, 1e-8)
+
+    def point(step, value):
+        x = left + step / max_step * plot_width
+        y = top + (1.0 - value / max_loss) * plot_height
+        return f"{x:.2f},{y:.2f}"
+
+    lines = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<rect width="100%" height="100%" fill="white"/>',
+        f'<line x1="{left}" y1="{top}" x2="{left}" y2="{height-bottom}" stroke="#111827"/>',
+        f'<line x1="{left}" y1="{height-bottom}" x2="{width-right}" y2="{height-bottom}" stroke="#111827"/>',
+        f'<text x="{width / 2}" y="{height - 20}" text-anchor="middle" font-family="sans-serif" font-size="16">Training step</text>',
+        f'<text x="20" y="{height / 2}" text-anchor="middle" font-family="sans-serif" font-size="16" transform="rotate(-90 20 {height / 2})">Loss</text>',
+        f'<text x="{left}" y="{height-bottom+25}" font-family="sans-serif" font-size="13">0</text>',
+        f'<text x="{width-right}" y="{height-bottom+25}" text-anchor="end" font-family="sans-serif" font-size="13">{max_step}</text>',
+        f'<text x="{left-10}" y="{top+5}" text-anchor="end" font-family="sans-serif" font-size="13">{max_loss:.4g}</text>',
+        f'<text x="{left-10}" y="{height-bottom+5}" text-anchor="end" font-family="sans-serif" font-size="13">0</text>',
+    ]
+    for index, (label, color, points) in enumerate(series):
+        if points:
+            coordinates = " ".join(point(step, value) for step, value in points)
+            lines.append(
+                f'<polyline points="{coordinates}" fill="none" stroke="{color}" stroke-width="2"/>'
+            )
+        legend_x = left + index * 190
+        lines.extend(
+            [
+                f'<line x1="{legend_x}" y1="20" x2="{legend_x+24}" y2="20" stroke="{color}" stroke-width="3"/>',
+                f'<text x="{legend_x+30}" y="25" font-family="sans-serif" font-size="14">{label}</text>',
+            ]
+        )
+    lines.append("</svg>")
+    output_path.write_text("\n".join(lines) + "\n")
 
 
 @torch.no_grad()
@@ -229,6 +288,23 @@ def main():
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, schedule)
     args.output.mkdir(parents=True, exist_ok=True)
+    train_log = (args.output / "train_loss.csv").open(
+        "w", newline="", buffering=1
+    )
+    validation_log = (args.output / "validation_loss.csv").open(
+        "w", newline="", buffering=1
+    )
+    train_writer = csv.writer(train_log)
+    validation_writer = csv.writer(validation_log)
+    train_writer.writerow(
+        ["step", "loss", "pose_loss", "gripper_loss", "learning_rate"]
+    )
+    validation_writer.writerow(
+        ["step", "split", "loss", "pose_loss", "gripper_loss"]
+    )
+    train_history = []
+    validation_history = []
+    curve_path = args.output / "loss_curve.svg"
     iterator = iter(train_loader)
     best_holdout = float("inf")
 
@@ -240,6 +316,9 @@ def main():
         print(f"holdout windows: {len(holdout_set)}")
         print(f"official validation windows: {len(official_val)}")
     print(f"trainable parameters: {sum(p.numel() for p in trainable):,}")
+    print(f"training loss log: {args.output / 'train_loss.csv'}")
+    print(f"validation loss log: {args.output / 'validation_loss.csv'}")
+    print(f"loss curve: {curve_path}")
 
     with tqdm(
         total=args.steps,
@@ -268,32 +347,64 @@ def main():
             optimizer.step()
             scheduler.step()
 
+            current_step = step + 1
+            current_lr = scheduler.get_last_lr()[0]
+            train_row = (
+                current_step,
+                loss.item(),
+                pose_loss.item(),
+                gripper_loss.item(),
+                current_lr,
+            )
+            train_history.append(train_row)
+            train_writer.writerow(train_row)
+            if current_step % 10 == 0 or current_step == args.steps:
+                write_loss_curve(train_history, validation_history, curve_path)
+
             train_progress.update(1)
             train_progress.set_postfix(
                 loss=f"{loss.item():.5f}",
                 pose=f"{pose_loss.item():.5f}",
                 gripper=f"{gripper_loss.item():.5f}",
-                lr=f"{scheduler.get_last_lr()[0]:.3e}",
+                lr=f"{current_lr:.3e}",
             )
 
             if not args.skip_eval and (
-                (step + 1) % 100 == 0 or step + 1 == args.steps
+                current_step % 100 == 0 or current_step == args.steps
             ):
                 holdout_loss, holdout_pose, holdout_gripper = evaluate(
                     model,
                     holdout_loader,
                     device,
-                    desc=f"Holdout @ step {step + 1}",
+                    desc=f"Holdout @ step {current_step}",
                 )
+                validation_row = (
+                    current_step,
+                    holdout_loss,
+                    holdout_pose,
+                    holdout_gripper,
+                    "holdout",
+                )
+                validation_history.append(validation_row)
+                validation_writer.writerow(
+                    [
+                        current_step,
+                        "holdout",
+                        holdout_loss,
+                        holdout_pose,
+                        holdout_gripper,
+                    ]
+                )
+                write_loss_curve(train_history, validation_history, curve_path)
                 tqdm.write(
-                    f"holdout step {step + 1}: loss={holdout_loss:.5f} "
+                    f"holdout step {current_step}: loss={holdout_loss:.5f} "
                     f"pose={holdout_pose:.5f} gripper={holdout_gripper:.5f}"
                 )
                 if holdout_loss < best_holdout:
                     best_holdout = holdout_loss
                     torch.save(
                         {
-                            "step": step + 1,
+                            "step": current_step,
                             "model_state_dict": model.state_dict(),
                             "optimizer_state_dict": optimizer.state_dict(),
                             "scheduler_state_dict": scheduler.state_dict(),
@@ -306,6 +417,12 @@ def main():
         final_loss = evaluate(
             model, official_val_loader, device, desc="Official validation"
         )
+        validation_history.append(
+            (args.steps, final_loss[0], final_loss[1], final_loss[2], "official")
+        )
+        validation_writer.writerow(
+            [args.steps, "official", final_loss[0], final_loss[1], final_loss[2]]
+        )
         tqdm.write(
             f"official validation: loss={final_loss[0]:.5f} "
             f"pose={final_loss[1]:.5f} gripper={final_loss[2]:.5f}"
@@ -316,6 +433,9 @@ def main():
         {"step": args.steps, "model_state_dict": model.state_dict()},
         args.output / "last.pt",
     )
+    write_loss_curve(train_history, validation_history, curve_path)
+    train_log.close()
+    validation_log.close()
 
 
 if __name__ == "__main__":
