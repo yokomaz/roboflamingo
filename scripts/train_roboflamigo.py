@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from tqdm import tqdm
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, random_split
 
@@ -78,11 +79,11 @@ def action_loss(prediction, target):
 
 
 @torch.no_grad()
-def evaluate(model, loader, device):
+def evaluate(model, loader, device, desc):
     model.eval()
     totals = torch.zeros(3, device=device)
     batches = 0
-    for batch in loader:
+    for batch in tqdm(loader, desc=desc, unit="batch", dynamic_ncols=True, leave=False):
         prediction, _ = model(
             batch["rgb_static"].to(device, non_blocking=True),
             batch["input_ids"].to(device, non_blocking=True),
@@ -146,6 +147,11 @@ def main():
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
+        "--skip-eval",
+        action="store_true",
+        help="Skip holdout and official validation; train on all training windows.",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=Path("runs/roboflamingo_debug"),
@@ -181,24 +187,33 @@ def main():
     model.to(device)
 
     full_train = CalvinDataset(args.dataset, "training", args.window_size)
-    train_size = int(len(full_train) * 0.8)
-    holdout_size = len(full_train) - train_size
-    train_set, holdout_set = random_split(
-        full_train,
-        [train_size, holdout_size],
-        generator=torch.Generator().manual_seed(args.seed),
-    )
-    official_val = CalvinDataset(args.dataset, "validation", args.window_size)
+    if args.skip_eval:
+        train_set = full_train
+        holdout_set = None
+        official_val = None
+    else:
+        train_size = int(len(full_train) * 0.8)
+        holdout_size = len(full_train) - train_size
+        train_set, holdout_set = random_split(
+            full_train,
+            [train_size, holdout_size],
+            generator=torch.Generator().manual_seed(args.seed),
+        )
+        official_val = CalvinDataset(args.dataset, "validation", args.window_size)
 
     train_loader = build_loader(
         train_set, image_processor, tokenizer, args.batch_size, True, args.workers
     )
-    holdout_loader = build_loader(
-        holdout_set, image_processor, tokenizer, args.batch_size, False, args.workers
-    )
-    official_val_loader = build_loader(
-        official_val, image_processor, tokenizer, args.batch_size, False, args.workers
-    )
+    if args.skip_eval:
+        holdout_loader = None
+        official_val_loader = None
+    else:
+        holdout_loader = build_loader(
+            holdout_set, image_processor, tokenizer, args.batch_size, False, args.workers
+        )
+        official_val_loader = build_loader(
+            official_val, image_processor, tokenizer, args.batch_size, False, args.workers
+        )
 
     optimizer = torch.optim.AdamW(
         trainable, lr=args.learning_rate, weight_decay=args.weight_decay
@@ -219,65 +234,84 @@ def main():
 
     print(f"device: {device}")
     print(f"train windows: {len(train_set)}")
-    print(f"holdout windows: {len(holdout_set)}")
-    print(f"official validation windows: {len(official_val)}")
+    if args.skip_eval:
+        print("holdout and official validation: skipped")
+    else:
+        print(f"holdout windows: {len(holdout_set)}")
+        print(f"official validation windows: {len(official_val)}")
     print(f"trainable parameters: {sum(p.numel() for p in trainable):,}")
 
-    for step in range(args.steps):
-        try:
-            batch = next(iterator)
-        except StopIteration:
-            iterator = iter(train_loader)
-            batch = next(iterator)
+    with tqdm(
+        total=args.steps,
+        desc="Training",
+        unit="step",
+        dynamic_ncols=True,
+    ) as train_progress:
+        for step in range(args.steps):
+            try:
+                batch = next(iterator)
+            except StopIteration:
+                iterator = iter(train_loader)
+                batch = next(iterator)
 
-        optimizer.zero_grad(set_to_none=True)
-        prediction, _ = model(
-            batch["rgb_static"].to(device, non_blocking=True),
-            batch["input_ids"].to(device, non_blocking=True),
-            batch["attention_mask"].to(device, non_blocking=True),
-        )
-        loss, pose_loss, gripper_loss = action_loss(
-            prediction, batch["actions"].to(device, non_blocking=True)
-        )
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(trainable, 1.0)
-        optimizer.step()
-        scheduler.step()
+            optimizer.zero_grad(set_to_none=True)
+            prediction, _ = model(
+                batch["rgb_static"].to(device, non_blocking=True),
+                batch["input_ids"].to(device, non_blocking=True),
+                batch["attention_mask"].to(device, non_blocking=True),
+            )
+            loss, pose_loss, gripper_loss = action_loss(
+                prediction, batch["actions"].to(device, non_blocking=True)
+            )
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+            optimizer.step()
+            scheduler.step()
 
-        if (step + 1) % 10 == 0 or step == 0:
-            print(
-                f"step {step + 1}/{args.steps} "
-                f"loss={loss.item():.5f} pose={pose_loss.item():.5f} "
-                f"gripper={gripper_loss.item():.5f} "
-                f"lr={scheduler.get_last_lr()[0]:.3e}"
+            train_progress.update(1)
+            train_progress.set_postfix(
+                loss=f"{loss.item():.5f}",
+                pose=f"{pose_loss.item():.5f}",
+                gripper=f"{gripper_loss.item():.5f}",
+                lr=f"{scheduler.get_last_lr()[0]:.3e}",
             )
 
-        if (step + 1) % 100 == 0 or step + 1 == args.steps:
-            holdout_loss, holdout_pose, holdout_gripper = evaluate(
-                model, holdout_loader, device
-            )
-            print(
-                f"holdout step {step + 1}: loss={holdout_loss:.5f} "
-                f"pose={holdout_pose:.5f} gripper={holdout_gripper:.5f}"
-            )
-            if holdout_loss < best_holdout:
-                best_holdout = holdout_loss
-                torch.save(
-                    {
-                        "step": step + 1,
-                        "model_state_dict": model.state_dict(),
-                        "optimizer_state_dict": optimizer.state_dict(),
-                        "scheduler_state_dict": scheduler.state_dict(),
-                        "holdout_loss": best_holdout,
-                    },
-                    args.output / "best.pt",
+            if not args.skip_eval and (
+                (step + 1) % 100 == 0 or step + 1 == args.steps
+            ):
+                holdout_loss, holdout_pose, holdout_gripper = evaluate(
+                    model,
+                    holdout_loader,
+                    device,
+                    desc=f"Holdout @ step {step + 1}",
                 )
+                tqdm.write(
+                    f"holdout step {step + 1}: loss={holdout_loss:.5f} "
+                    f"pose={holdout_pose:.5f} gripper={holdout_gripper:.5f}"
+                )
+                if holdout_loss < best_holdout:
+                    best_holdout = holdout_loss
+                    torch.save(
+                        {
+                            "step": step + 1,
+                            "model_state_dict": model.state_dict(),
+                            "optimizer_state_dict": optimizer.state_dict(),
+                            "scheduler_state_dict": scheduler.state_dict(),
+                            "holdout_loss": best_holdout,
+                        },
+                        args.output / "best.pt",
+                    )
 
-    final_loss = evaluate(model, official_val_loader, device)
-    print(
-        f"official validation: loss={final_loss[0]:.5f} "
-        f"pose={final_loss[1]:.5f} gripper={final_loss[2]:.5f}"
-    )
+    if not args.skip_eval:
+        final_loss = evaluate(
+            model, official_val_loader, device, desc="Official validation"
+        )
+        tqdm.write(
+            f"official validation: loss={final_loss[0]:.5f} "
+            f"pose={final_loss[1]:.5f} gripper={final_loss[2]:.5f}"
+        )
+    else:
+        tqdm.write("official validation: skipped")
     torch.save(
         {"step": args.steps, "model_state_dict": model.state_dict()},
         args.output / "last.pt",

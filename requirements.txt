@@ -8,4 +8,4 @@ open-clip-torch==3.3.0
 einops==0.8.2
 modelscope==1.40.0
 sentencepiece==0.2.2
-
+tqdm==4.67.1
