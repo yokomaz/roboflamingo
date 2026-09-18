@@ -17,6 +17,7 @@ venv/
 models/
 calvin/dataset/
 runs/
+output*/
 *.pt
 *.pth
 *.bin
@@ -29,4 +30,3 @@ calvin/
 
 # Logs
 *.log
-

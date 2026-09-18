@@ -200,6 +200,7 @@ def main():
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--window-size", type=int, default=32)
     parser.add_argument("--steps", type=int, default=1000)
+    parser.add_argument("--checkpoint-steps", type=int, default=1000)
     parser.add_argument("--warmup-steps", type=int, default=100)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
@@ -217,6 +218,8 @@ def main():
     )
     parser.add_argument("--local-files-only", action="store_true")
     args = parser.parse_args()
+    if args.checkpoint_steps <= 0:
+        parser.error("--checkpoint-steps must be greater than zero")
 
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -319,6 +322,10 @@ def main():
     print(f"training loss log: {args.output / 'train_loss.csv'}")
     print(f"validation loss log: {args.output / 'validation_loss.csv'}")
     print(f"loss curve: {curve_path}")
+    print(
+        f"periodic checkpoint: {args.output / 'checkpoint.pt'} "
+        f"(every {args.checkpoint_steps} steps)"
+    )
 
     with tqdm(
         total=args.steps,
@@ -368,6 +375,18 @@ def main():
                 gripper=f"{gripper_loss.item():.5f}",
                 lr=f"{current_lr:.3e}",
             )
+
+            if current_step % args.checkpoint_steps == 0:
+                torch.save(
+                    {
+                        "step": current_step,
+                        "model_state_dict": model.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "scheduler_state_dict": scheduler.state_dict(),
+                    },
+                    args.output / "checkpoint.pt",
+                )
+                tqdm.write(f"saved checkpoint at step {current_step}")
 
             if not args.skip_eval and (
                 current_step % 100 == 0 or current_step == args.steps
